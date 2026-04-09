@@ -39,10 +39,8 @@ def load_model():
     # NEW: Download model from Google Drive if it's missing locally
     if not os.path.exists(model_path):
         with st.spinner("Downloading model weights... (This may take a minute on first run)"):
-            # !!! IMPORTANT: Replace 'YOUR_FILE_ID_HERE' with your actual Google Drive File ID !!!
-            # Example: If your share link is https://drive.google.com/file/d/1aBcD_eFgHiJkL_mNoP/view
-            # Your File ID is: 1aBcD_eFgHiJkL_mNoP
-            file_id = 'YOUR_FILE_ID_HERE' 
+      
+            file_id = '13GMypOiKeVgasvnCSPd6ta32GRFu91IL' 
             url = f'https://drive.google.com/uc?id={file_id}'
             try:
                 gdown.download(url, model_path, quiet=False)
