@@ -1,150 +1,133 @@
-{
-  "cells": [
-    {
-      "cell_type": "markdown",
-      "metadata": {
-        "id": "view-in-github",
-        "colab_type": "text"
-      },
-      "source": [
-        "<a href=\"https://colab.research.google.com/github/ANAS-Y/Handwriting-Recognition-Model/blob/main/app.py\" target=\"_parent\"><img src=\"https://colab.research.google.com/assets/colab-badge.svg\" alt=\"Open In Colab\"/></a>"
-      ]
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "import streamlit as st\n",
-        "import torch\n",
-        "import torch.nn as nn\n",
-        "import cv2\n",
-        "import numpy as np\n",
-        "from PIL import Image\n",
-        "\n",
-        "# 1. Redefine the exact same architecture used in Colab\n",
-        "class CRNN(nn.Module):\n",
-        "    def __init__(self, num_classes, hidden_size=256):\n",
-        "        super(CRNN, self).__init__()\n",
-        "        self.cnn = nn.Sequential(\n",
-        "            nn.Conv2d(1, 64, 3, 1, 1), nn.ReLU(), nn.MaxPool2d(2, 2),\n",
-        "            nn.Conv2d(64, 128, 3, 1, 1), nn.ReLU(), nn.MaxPool2d(2, 2),\n",
-        "            nn.Conv2d(128, 256, 3, 1, 1), nn.BatchNorm2d(256), nn.ReLU(),\n",
-        "            nn.Conv2d(256, 256, 3, 1, 1), nn.ReLU(), nn.MaxPool2d((2, 2), (2, 2)),\n",
-        "            nn.Conv2d(256, 512, 3, 1, 1), nn.BatchNorm2d(512), nn.ReLU()\n",
-        "        )\n",
-        "        self.rnn = nn.LSTM(512 * 8, hidden_size, bidirectional=True, batch_first=True)\n",
-        "        self.fc = nn.Linear(hidden_size * 2, num_classes)\n",
-        "\n",
-        "    def forward(self, x):\n",
-        "        conv_out = self.cnn(x)\n",
-        "        b, c, h, w = conv_out.size()\n",
-        "        conv_out = conv_out.permute(0, 3, 1, 2).contiguous()\n",
-        "        conv_out = conv_out.view(b, w, c * h)\n",
-        "        rnn_out, _ = self.rnn(conv_out)\n",
-        "        output = self.fc(rnn_out)\n",
-        "        return output.permute(1, 0, 2)\n",
-        "\n",
-        "# 2. Loading Function with Caching for Performance\n",
-        "@st.cache_resource\n",
-        "def load_model():\n",
-        "    try:\n",
-        "        vocab_data = torch.load('vocab.pth', map_location='cpu')\n",
-        "        idx_to_char = vocab_data['idx_to_char']\n",
-        "        num_classes = len(idx_to_char) + 1\n",
-        "\n",
-        "        model = CRNN(num_classes)\n",
-        "        model.load_state_dict(torch.load('washington_crnn.pth', map_location='cpu'))\n",
-        "        model.eval()\n",
-        "        return model, idx_to_char\n",
-        "    except Exception as e:\n",
-        "        st.error(f\"Failed to load model or vocab files. Ensure 'washington_crnn.pth' and 'vocab.pth' are in the same directory. Error: {e}\")\n",
-        "        return None, None\n",
-        "\n",
-        "# 3. Image Preprocessing\n",
-        "def preprocess_image(image):\n",
-        "    # Convert PIL to OpenCV grayscale\n",
-        "    img = np.array(image.convert('L'))\n",
-        "\n",
-        "    # Same padding logic as training\n",
-        "    target_h, target_w = 64, 800\n",
-        "    h, w = img.shape\n",
-        "    scale = target_h / h\n",
-        "    new_w = min(int(w * scale), target_w)\n",
-        "    img = cv2.resize(img, (new_w, target_h))\n",
-        "\n",
-        "    padded_img = np.ones((target_h, target_w), dtype=np.uint8) * 255\n",
-        "    padded_img[:, :new_w] = img\n",
-        "\n",
-        "    padded_img = (padded_img / 127.5) - 1.0\n",
-        "    tensor = torch.FloatTensor(padded_img).unsqueeze(0).unsqueeze(0)\n",
-        "    return tensor\n",
-        "\n",
-        "# 4. CTC Greedy Decoder\n",
-        "def decode_predictions(preds, idx_to_char):\n",
-        "    # preds shape: [Seq_len, Batch, Classes] -> [Seq_len, Classes]\n",
-        "    preds = preds[:, 0, :]\n",
-        "    _, max_indices = torch.max(preds, 1)\n",
-        "\n",
-        "    # Greedy decoding: remove duplicates and 0 (blank token)\n",
-        "    decoded = []\n",
-        "    prev_idx = -1\n",
-        "    for idx in max_indices.tolist():\n",
-        "        if idx != 0 and idx != prev_idx:\n",
-        "            decoded.append(idx_to_char[idx])\n",
-        "        prev_idx = idx\n",
-        "\n",
-        "    return \"\".join(decoded)\n",
-        "\n",
-        "# 5. Streamlit User Interface\n",
-        "st.set_page_config(page_title=\"Historical OCR\", page_icon=\"📜\", layout=\"centered\")\n",
-        "\n",
-        "st.title(\"📜 Historical Handwriting Recognition\")\n",
-        "st.markdown(\"Upload a binarized line-level image from the Washington Database to transcribe it.\")\n",
-        "\n",
-        "# Load resources\n",
-        "model, idx_to_char = load_model()\n",
-        "\n",
-        "if model is not None:\n",
-        "    uploaded_file = st.file_uploader(\"Upload an image (PNG/JPG)\", type=[\"png\", \"jpg\", \"jpeg\"])\n",
-        "\n",
-        "    if uploaded_file is not None:\n",
-        "        image = Image.open(uploaded_file)\n",
-        "        st.image(image, caption=\"Uploaded Document Line\", use_container_width=True)\n",
-        "\n",
-        "        if st.button(\"Transcribe Document\", type=\"primary\"):\n",
-        "            with st.spinner('Analyzing handwriting sequences...'):\n",
-        "                tensor_img = preprocess_image(image)\n",
-        "\n",
-        "                with torch.no_grad():\n",
-        "                    preds = model(tensor_img)\n",
-        "\n",
-        "                transcription = decode_predictions(preds, idx_to_char)\n",
-        "\n",
-        "            st.success(\"Transcription Complete!\")\n",
-        "            st.code(transcription, language='text')\n",
-        "\n",
-        "st.sidebar.markdown(\"\"\"\n",
-        "### About This App\n",
-        "Developed for the **Group 4 DeepTech Capstone**.\n",
-        "This utilizes a PyTorch CRNN + CTC Loss architecture trained specifically on the 18th-century George Washington historical manuscript dataset.\n",
-        "\"\"\")"
-      ],
-      "outputs": [],
-      "execution_count": null,
-      "metadata": {
-        "id": "noK5ZJi1bywV"
-      }
-    }
-  ],
-  "metadata": {
-    "colab": {
-      "provenance": [],
-      "include_colab_link": true
-    },
-    "kernelspec": {
-      "display_name": "Python 3",
-      "name": "python3"
-    }
-  },
-  "nbformat": 4,
-  "nbformat_minor": 0
-}
+import streamlit as st
+import torch
+import torch.nn as nn
+import cv2
+import numpy as np
+from PIL import Image
+import gdown
+import os
+
+# 1. Redefine the exact same architecture used in Colab
+class CRNN(nn.Module):
+    def __init__(self, num_classes, hidden_size=256):
+        super(CRNN, self).__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv2d(1, 64, 3, 1, 1), nn.ReLU(), nn.MaxPool2d(2, 2),
+            nn.Conv2d(64, 128, 3, 1, 1), nn.ReLU(), nn.MaxPool2d(2, 2),
+            nn.Conv2d(128, 256, 3, 1, 1), nn.BatchNorm2d(256), nn.ReLU(),
+            nn.Conv2d(256, 256, 3, 1, 1), nn.ReLU(), nn.MaxPool2d((2, 2), (2, 2)),
+            nn.Conv2d(256, 512, 3, 1, 1), nn.BatchNorm2d(512), nn.ReLU()
+        )
+        self.rnn = nn.LSTM(512 * 8, hidden_size, bidirectional=True, batch_first=True)
+        self.fc = nn.Linear(hidden_size * 2, num_classes)
+
+    def forward(self, x):
+        conv_out = self.cnn(x)
+        b, c, h, w = conv_out.size()
+        conv_out = conv_out.permute(0, 3, 1, 2).contiguous()
+        conv_out = conv_out.view(b, w, c * h)
+        rnn_out, _ = self.rnn(conv_out)
+        output = self.fc(rnn_out)
+        return output.permute(1, 0, 2)
+
+# 2. Loading Function with Google Drive Bypass & Caching
+@st.cache_resource
+def load_model():
+    model_path = 'washington_crnn.pth'
+    vocab_path = 'vocab.pth'
+    
+    # NEW: Download model from Google Drive if it's missing locally
+    if not os.path.exists(model_path):
+        with st.spinner("Downloading model weights... (This may take a minute on first run)"):
+            # !!! IMPORTANT: Replace 'YOUR_FILE_ID_HERE' with your actual Google Drive File ID !!!
+            # Example: If your share link is https://drive.google.com/file/d/1aBcD_eFgHiJkL_mNoP/view
+            # Your File ID is: 1aBcD_eFgHiJkL_mNoP
+            file_id = 'YOUR_FILE_ID_HERE' 
+            url = f'https://drive.google.com/uc?id={file_id}'
+            try:
+                gdown.download(url, model_path, quiet=False)
+            except Exception as e:
+                st.error(f"Failed to download model from Google Drive: {e}")
+                return None, None
+
+    try:
+        vocab_data = torch.load(vocab_path, map_location='cpu')
+        idx_to_char = vocab_data['idx_to_char']
+        num_classes = len(idx_to_char) + 1
+        
+        model = CRNN(num_classes)
+        model.load_state_dict(torch.load(model_path, map_location='cpu'))
+        model.eval()
+        return model, idx_to_char
+    except Exception as e:
+        st.error(f"Failed to load model or vocab files. Error: {e}")
+        return None, None
+
+# 3. Image Preprocessing
+def preprocess_image(image):
+    # Convert PIL to OpenCV grayscale
+    img = np.array(image.convert('L'))
+    
+    # Same padding logic as training
+    target_h, target_w = 64, 800
+    h, w = img.shape
+    scale = target_h / h
+    new_w = min(int(w * scale), target_w)
+    img = cv2.resize(img, (new_w, target_h))
+    
+    padded_img = np.ones((target_h, target_w), dtype=np.uint8) * 255
+    padded_img[:, :new_w] = img
+    
+    padded_img = (padded_img / 127.5) - 1.0
+    tensor = torch.FloatTensor(padded_img).unsqueeze(0).unsqueeze(0)
+    return tensor
+
+# 4. CTC Greedy Decoder
+def decode_predictions(preds, idx_to_char):
+    # preds shape: [Seq_len, Batch, Classes] -> [Seq_len, Classes]
+    preds = preds[:, 0, :]
+    _, max_indices = torch.max(preds, 1)
+    
+    # Greedy decoding: remove duplicates and 0 (blank token)
+    decoded = []
+    prev_idx = -1
+    for idx in max_indices.tolist():
+        if idx != 0 and idx != prev_idx:
+            decoded.append(idx_to_char[idx])
+        prev_idx = idx
+        
+    return "".join(decoded)
+
+# 5. Streamlit User Interface
+st.set_page_config(page_title="Historical OCR", page_icon="📜", layout="centered")
+
+st.title("📜 Historical Handwriting Recognition")
+st.markdown("Upload a binarized line-level image from the Washington Database to transcribe it.")
+
+# Load resources
+model, idx_to_char = load_model()
+
+if model is not None:
+    uploaded_file = st.file_uploader("Upload an image (PNG/JPG)", type=["png", "jpg", "jpeg"])
+
+    if uploaded_file is not None:
+        image = Image.open(uploaded_file)
+        st.image(image, caption="Uploaded Document Line", use_container_width=True)
+        
+        if st.button("Transcribe Document", type="primary"):
+            with st.spinner('Analyzing handwriting sequences...'):
+                tensor_img = preprocess_image(image)
+                
+                with torch.no_grad():
+                    preds = model(tensor_img)
+                    
+                transcription = decode_predictions(preds, idx_to_char)
+                
+            st.success("Transcription Complete!")
+            st.code(transcription, language='text')
+
+st.sidebar.markdown("""
+### About This App
+Developed for the **Group 4 DeepTech Capstone**. 
+This utilizes a PyTorch CRNN + CTC Loss architecture trained specifically on the 18th-century George Washington historical manuscript dataset.
+""")
